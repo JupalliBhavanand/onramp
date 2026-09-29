@@ -1,0 +1,41 @@
+// Vercel serverless function: keeps your Anthropic API key on the server.
+const KB = `OnRamp (onramp.us) is a customer onboarding and engagement platform trusted by enterprise B2B teams to streamline workflows, delight customers and retain revenue at scale. Tagline: Onboarding starts your relationship. Engagement makes it last. Based in Boston, Massachusetts. Contact: hello@onramp.us, 617-329-5011. Book a demo at onramp.us/demo. Pricing page: onramp.us/pricing; specific prices are not shared here and are discussed with the team.
+One platform, two experiences: personalized journeys for customers (a self-serve portal) and for internal teams (project management).
+Products: Customer Portal (self-serve, role-specific, branded with the customer's company name, logo, colors and a magic link); Internal Project Management; Dynamic Process Automation (rule-based and AI-driven workflows that trigger internal and customer-facing tasks); Enhanced Reporting (velocity, bottlenecks, completion risks, AI summaries and recommendations); Powerful Integrations (push clean structured data to CRMs, project tools and systems of record); Security and Compliance (enterprise-grade, with GDPR, SOC 2 and HIPAA badges).
+OnRamp AI: agentic AI can build a tailored playbook in under an hour from a spreadsheet, image or natural language, personalizes customer experiences, keeps post-sales momentum, and surfaces next best steps and risk alerts.
+By team: Customer Success, Revenue Operations, Implementation, Leadership. By industry: B2B SaaS, Client Services, Healthcare, Revenue Cycle Management, Distribution, Wholesale and vendor onboarding, Manufacturing, Carrier onboarding. Use cases: accelerate revenue, onboard faster, engage customers and improve retention, work proactively with onboarding visibility.
+Customer results: Qualia cut go-live time 53% and scaled onboarding capacity 3x. AGS Health cut onboarding time 30% and recognized revenue about 3 months sooner. Flosum cut onboarding time 70% with 7 repeatable playbooks. InCharge saw a 76% increase in 60-day retention and 19% more first payments. A2Z improved time-to-activation 75%. Espresa handled 2.5x more onboardings with static headcount and 90+% CSAT. Push Operations gained predictable MRR forecasting. Other customers include CVS Health, Bullhorn, Betterment, HHAeXchange, JustPark, Tapcheck and Xplor.
+Resources: blog, demo center with an interactive platform tour, guides and reports (including a 2026 onboarding report from 161 CS, SaaS and B2B leaders), webinars, knowledge base at help.onramp.us, and a product release library. Existing customers log in at app.onramp.us. Careers are listed on onramp.us/careers.`;
+const SYS = `You are Ava, the warm, knowledgeable onboarding concierge at OnRamp, speaking with a visitor who just tapped in. Your reply is read aloud: 2 to 4 short sentences, plain text, no markdown, no emoji. Use ONLY the knowledge below; never invent pricing, features, integrations or customer numbers. If unsure, say a colleague will confirm and offer hello@onramp.us or 617-329-5011. You cannot confirm a booking yourself; if they want a demo, pricing, or to meet the team, end with the exact token [[SCHEDULE]]. Existing customers who need support should use help.onramp.us or their login.\n\nKNOWLEDGE:\n${KB}`;
+
+module.exports = async (req, res) => {
+  if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return res.status(500).json({ error: "Missing ANTHROPIC_API_KEY" });
+
+  // sanitise: last 8 turns, capped length, must start with a user turn, roles must alternate
+  const raw = Array.isArray(req.body && req.body.messages) ? req.body.messages.slice(-8) : [];
+  const msgs = [];
+  for (const m of raw) {
+    if (!m || (m.role !== "user" && m.role !== "assistant") || typeof m.content !== "string") continue;
+    const c = m.content.slice(0, 1000);
+    if (!msgs.length && m.role !== "user") continue;
+    if (msgs.length && msgs[msgs.length - 1].role === m.role) msgs[msgs.length - 1].content += "\n" + c;
+    else msgs.push({ role: m.role, content: c });
+  }
+  if (!msgs.length || msgs[msgs.length - 1].role !== "user") return res.status(400).json({ error: "Bad request" });
+
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+      body: JSON.stringify({ model: process.env.CLAUDE_MODEL || "claude-sonnet-5-5", max_tokens: 300, system: SYS, messages: msgs })
+    });
+    const d = await r.json();
+    if (!r.ok) return res.status(502).json({ error: (d.error && d.error.message) || "Upstream error" });
+    const text = (d.content || []).filter(b => b.type === "text").map(b => b.text).join("").trim();
+    return res.status(200).json({ text });
+  } catch (e) {
+    return res.status(502).json({ error: "Upstream unreachable" });
+  }
+};
